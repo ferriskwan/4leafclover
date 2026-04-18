@@ -1,0 +1,30 @@
+# Ignore Windows Executables
+*.exe
+*.msi
+*.dll
+*.lnk
+
+# Ignore datafeeds and log files
+*.log
+*.csv
+*.json
+*.txt
+
+# Ignore pictures and media files
+*.jpg
+*.jpeg
+*.png
+*.gif
+*.mp4
+*.mp3
+
+# Ignore Python/uv environment folders
+.venv/
+__pycache__/
+
+# Ignore OS-specific files
+.DS_Store
+Thumbs.db
+
+# Ignore your SQLite database (optional, depending on if you want a clean start)
+*.db
