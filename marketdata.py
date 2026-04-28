@@ -11,8 +11,8 @@ import numpy as np
 import requests
 import yfinance as yf
 
-debug = True
-#debug = False
+# inherit logging configuration from main.py
+logger = logging.getLogger(__name__)
 
 def pulldata_twelvedata(symbol, interval, startdate, enddate):
     try:
@@ -22,16 +22,16 @@ def pulldata_twelvedata(symbol, interval, startdate, enddate):
                                 "&start_date="+startdate+
                                 "&end_date="+enddate+
                                 "&format=JSON")
-        if debug:
-            print(f"Fetching data for {symbol}")
+        logger.debug(f"[marketdata.py].pulldata_twelvedata(): Fetching data for {symbol}")
     except requests.exceptions.RequestException as e:
-        print(f"Error fetching data for {symbol}: {e}")
+        logger.error(f"[marketdata.py].pulldata_twelvedata(): Error fetching data for {symbol}: {e}")
         return None
     return response.json()
 
 def pulldata_yahoo(symbol, interval, startdate, enddate):
     try:
         data = yf.download(symbol, start=startdate, end=enddate, interval=interval, multi_level_index=False)
+        logger.debug(f"[marketdata.py].pulldata_yahoo(): Fetching data for {symbol}")
 
         output = {"meta":{ "symbol": symbol, "interval": interval, "start_date": startdate, "end_date": enddate}}
         
@@ -46,6 +46,7 @@ def pulldata_yahoo(symbol, interval, startdate, enddate):
                 "volume": str(row['Volume'])
             })
         output["values"] = values
+        logger.debug(f"[marketdata.py].pulldata_yahoo(): Successfully fetched data for {symbol}, total records: {len(values)}")
         return output
     except Exception as e:
         print(f"Error fetching data for {symbol}: {e}")

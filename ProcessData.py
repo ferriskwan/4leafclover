@@ -2,14 +2,12 @@ from pathlib import Path
 import os
 import sqlite3
 import logging
-import marketdata as md
-
+# import marketdata as md
 parentDir = os.getcwd()
-print(f"Parent directory: {parentDir}")
-
 
 # inherit logging configuration from main.py
 logger = logging.getLogger(__name__)
+logger.debug(f"[ProcessData.py]: Parent directory: {parentDir}")
 
 # Returns a connection to the clover.db SQLite database
 def connect_clover():
@@ -46,7 +44,7 @@ def insert_Tickdata(connection, data):
 
     cursor = connection.cursor()
     cursor.executemany(
-        "INSERT INTO TickData (Symbol, Interval, Timestamp, Open, High, Low, Close, Volume) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        "INSERT INTO TickData (Symbol, Interval, Timestamp, Open, High, Low, Close, Volume, UpdateDatetime) VALUES (?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)",
         values
     )
     connection.commit()
@@ -83,7 +81,7 @@ def insert_EODData(connection, data):
 
     cursor = connection.cursor()
     cursor.executemany(
-        "INSERT INTO EODData (Symbol, Date, Open, High, Low, Close, Volume) VALUES (?, ?, ?, ?, ?, ?, ?)",
+        "INSERT INTO EODData (Symbol, Date, Open, High, Low, Close, Volume, UpdateDatetime) VALUES (?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)",
         values
     )
     connection.commit()
@@ -91,16 +89,146 @@ def insert_EODData(connection, data):
     return cursor.rowcount
 
 
-# Pull the tick data first, then insert into SQLite
-# data1 = md.pulldata_twelvedata("GLW", "5min", "2026-04-15", "2026-04-16")
-# data3 = md.pulldata_yahoo("5E2.SI", "5m", "2026-04-15", "2026-04-16")
-# 
-# conn = connect_clover()
-# with conn:
-#     inserted = insert_tickdata(conn, data1)
-#     print(f'Inserted {inserted} rows into TickData')
-#     cursor = conn.cursor()
-#     cursor.execute("SELECT count(*) FROM TickData")
-#     results = cursor.fetchall()
-#     print(results)
+def TickData_generate(connection, symbol):
+    """
+    Generates a dictionary object containing tick data and metadata for charting.
+    
+    Args:
+        connection: SQLite database connection to clover.db
+        symbol: The stock symbol to retrieve data for
+        
+    Returns:
+        A dictionary with:
+        - "meta": Contains reference data (Symbol, WatchList, Interval, Name, Timezone)
+        - "values": List of tick data records (Timestamp, Open, High, Low, Close, Volume) sorted by Timestamp
+    """
+    logger.debug("[ProcessData.py].TickData_generate(): Generating tick data for symbol %s", symbol)
+    
+    cursor = connection.cursor()
+    
+    # Query WatchList to get Symbol and WatchList
+    cursor.execute("SELECT Symbol, WatchListName, Name, Timezone FROM WatchList WHERE Symbol = ?", (symbol,))
+    watchlist_row = cursor.fetchone()
+    
+    if not watchlist_row:
+        logger.warning("[ProcessData.py].TickData_generate(): No WatchList entry found for symbol %s", symbol)
+        return None
+    
+    watchlist_symbol, watchlist_name, name, timezone = watchlist_row
+    
+    # Query TickData to get Interval and OHLCV data
+    cursor.execute(
+        "SELECT Interval, Timestamp, Open, High, Low, Close, Volume FROM TickData WHERE Symbol = ? ORDER BY Timestamp",
+        (symbol,)
+    )
+    tick_rows = cursor.fetchall()
+    
+    if not tick_rows:
+        logger.warning("[ProcessData.py].TickData_generate(): No TickData found for symbol %s", symbol)
+        return None
+    
+    # Get interval from first row (should be same for all)
+    interval = tick_rows[0][0]
+    
+    # Build the values list with tick data sorted by timestamp
+    values = []
+    for row in tick_rows:
+        values.append({
+            'Timestamp': row[1],
+            'Open': row[2],
+            'High': row[3],
+            'Low': row[4],
+            'Close': row[5],
+            'Volume': row[6]
+        })
+    
+    # Build the meta dictionary
+    meta = {
+        'Symbol': watchlist_symbol,
+        'WatchList': watchlist_name,
+        'Interval': interval,
+        'Name': name,
+        'Timezone': timezone
+    }
+    
+    # Build and return the final data dictionary
+    data = {
+        'meta': meta,
+        'values': values
+    }
+    
+    logger.debug("[ProcessData.py].TickData_generate(): Generated data for symbol %s with %d tick records", symbol, len(values))
+    return data
+
+
+def EODData_generate(connection, symbol):
+    """
+    Generates a dictionary object containing end-of-day market data and metadata for charting.
+    
+    Args:
+        connection: SQLite database connection to clover.db
+        symbol: The stock symbol to retrieve data for
+        
+    Returns:
+        A dictionary with:
+        - "meta": Contains reference data (Symbol, WatchList, Interval='1d', Name, Timezone)
+        - "values": List of EOD records (Date, Open, High, Low, Close, Volume) sorted by Date
+    """
+    logger.debug("[ProcessData.py].EODData_generate(): Generating EOD data for symbol %s", symbol)
+    
+    cursor = connection.cursor()
+    
+    # Query WatchList to get Symbol and WatchList
+    cursor.execute("SELECT Symbol, WatchListName, Name, Timezone FROM WatchList WHERE Symbol = ?", (symbol,))
+    watchlist_row = cursor.fetchone()
+    
+    if not watchlist_row:
+        logger.warning("[ProcessData.py].EODData_generate(): No WatchList entry found for symbol %s", symbol)
+        return None
+    
+    watchlist_symbol, watchlist_name, name, timezone = watchlist_row
+    
+    # Query EODData to get market close data
+    cursor.execute(
+        "SELECT Date, datetime(Date) as Timestamnp, Open, High, Low, Close, Volume FROM EODData WHERE Symbol = ? ORDER BY Date",
+        (symbol,)
+    )
+    eod_rows = cursor.fetchall()
+    
+    if not eod_rows:
+        logger.warning("[ProcessData.py].EODData_generate(): No EODData found for symbol %s", symbol)
+        return None
+    
+    # Build the values list with EOD data sorted by date
+    values = []
+    for row in eod_rows:
+        values.append({
+            'Date': row[0],
+            'Timestamp': row[1],
+            'Open': row[2],
+            'High': row[3],
+            'Low': row[4],
+            'Close': row[5],
+            'Volume': row[6]
+        })
+    
+    # Build the meta dictionary with hardcoded interval '1d'
+    meta = {
+        'Symbol': watchlist_symbol,
+        'WatchList': watchlist_name,
+        'Interval': '1d',
+        'Name': name,
+        'Timezone': timezone
+    }
+    
+    # Build and return the final data dictionary
+    data = {
+        'meta': meta,
+        'values': values
+    }
+    
+    logger.debug("[ProcessData.py].EODData_generate(): Generated data for symbol %s with %d EOD records", symbol, len(values))
+    return data
+
+
 

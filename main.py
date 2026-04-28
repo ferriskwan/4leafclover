@@ -6,26 +6,36 @@ import ProcessData as pd
 import marketdata as md
 import sqlite3
 
-global_startdate = "2025-01-01"
-global_today = "2026-04-21"
+print("[main.py]: Start of program")
+
+# Establish a connection to the clover.db SQLite database
+conn1 = pd.connect_clover()
+cursor = conn1.cursor()
+
+# Query SysValue table for global dates
+print("[main.py]: Querying SysValue for global dates")
+cursor.execute("select Name, DateValue from SysValue where Name in ('GLOBAL_STARTDATE', 'GLOBAL_TODAY')")
+sys_values = cursor.fetchall()
+sys_dict = {row[0]: row[1] for row in sys_values}
+global_startdate = sys_dict.get('GLOBAL_STARTDATE', '2025-01-01')
+global_today = sys_dict.get('GLOBAL_TODAY', '2026-04-01')
+print(f"[main.py]: Global start date is {global_startdate}, Global today is {global_today}")
 
 parentDir = os.getcwd()
-print(f"Parent directory: {parentDir}")
+print(f"[main.py]: Parent directory is {parentDir}")
+
+# Where logfiles reside
+logDir = os.path.join(str(parentDir), "Logs")
+logging.basicConfig(filename=str(os.path.join(str(logDir), str(global_today) + ".log")), level=logging.DEBUG, format='%(asctime)s -  %(levelname)s -  %(message)s')
+print("[main.py]: Logging initialized. Log file is " + str(os.path.join(str(logDir), str(global_today) + ".log")))
 
 # Where new datafiles reside
 dataDir = os.path.join(str(parentDir), 'Data')
+logging.debug(f"[main.py]: Data directory is {dataDir}")
 
-# Where processed datafiles resiide
-# After a datafile is processed in dataDir, it is moved to processedDataDir 
+# Where processed datafiles reside.  After a datafile is processed in dataDir, it is moved to processedDataDir 
 processedDataDir = os.path.join(str(parentDir), 'ProcessedData')
-
-logDir = os.path.join(str(parentDir), "Logs")
-logging.basicConfig(filename=str(os.path.join(str(logDir), str(global_today) + ".log")), level=logging.DEBUG, format='%(asctime)s -  %(levelname)s -  %(message)s')
-
-logging.debug("[main.py]: Start of program")
-conn1 = pd.connect_clover()
-
-cursor = conn1.cursor()
+logging.debug(f"[main.py]: Processed data directory is {processedDataDir}")
 
 # This SQL query retrieves all symbols from the WatchList table and determines the appropriate start date for pulling data for each symbol based on the latest date available in the EODData table.
 # Incremental Updates: Avoids re-downloading data you already have. It starts pulling from the day after the last recorded date.
@@ -55,7 +65,6 @@ cursor.execute("select w.Symbol, (case when max(e.Timestamp) is NULL then date('
     "else max(date(max(e.Timestamp),'+1 day'),date('"+str(global_today)+"')) end) "
     "from WatchList w left join TickData e on w.Symbol=e.Symbol group by w.Symbol")
 logging.debug("[main.py].TickData: Retrieved symbols from WatchList for TickData")
-print(cursor.fetchall())
 
 symbols = cursor.fetchall()
 
@@ -67,3 +76,5 @@ for symbol_tuple in symbols:
     with conn1:
         logging.debug("[main.py].TickData: Inserting data for symbol: %s", symbol)
         pd.insert_Tickdata(conn1, pulldata)
+
+
