@@ -12,6 +12,10 @@ print("[main.py]: Start of program")
 conn1 = pd.connect_clover()
 cursor = conn1.cursor()
 
+# Update SysValue.GLOBAL_TODAY to current date. This is used as a reference point for pulling data and for logging.
+cursor.execute("UPDATE SysValue SET DateValue = date(CURRENT_TIMESTAMP) WHERE Name = 'GLOBAL_TODAY'")
+conn1.commit()
+
 # Query SysValue table for global dates
 print("[main.py]: Querying SysValue for global dates")
 cursor.execute("select Name, DateValue from SysValue where Name in ('GLOBAL_STARTDATE', 'GLOBAL_TODAY')")
@@ -62,7 +66,7 @@ for symbol_tuple in symbols:
 # Tick Data Specifics: Tick data is high-volume and often only relevant for recent periods (e.g., last 7 days). The 7-day fallback prevents overloading with old data, and the max(..., date('2026-04-21')) ensures it doesn't go beyond today.
 # Edge Cases: Handles new symbols (no existing data) by starting 7 days back. If the last timestamp is recent, it resumes from the next day.
 cursor.execute("select w.Symbol, (case when max(e.Timestamp) is NULL then date('"+str(global_today)+"','-7 days') "
-    "else max(date(max(e.Timestamp),'+1 day'),date('"+str(global_today)+"')) end) "
+    "else max(date(max(e.Timestamp)),date('"+str(global_today)+"','-7 days')) end) "
     "from WatchList w left join TickData e on w.Symbol=e.Symbol group by w.Symbol")
 logging.debug("[main.py].TickData: Retrieved symbols from WatchList for TickData")
 

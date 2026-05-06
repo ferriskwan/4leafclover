@@ -35,7 +35,7 @@ def insert_Tickdata(connection, data):
         except (ValueError, TypeError) as exc:
             logger.warning('Skipping invalid row %s: %s', row, exc)
             continue
-        logger.debug("[ProcessData.py].insert_tickdata(): Inserting row for symbol %s: %s", symbol, row)
+        # logger.debug("[ProcessData.py].insert_tickdata(): Inserting row for symbol %s: %s", symbol, row)
         values.append((symbol, interval, timestamp, open_price, high_price, low_price, close_price, volume))
 
     if not values:
@@ -43,6 +43,10 @@ def insert_Tickdata(connection, data):
         return 0
 
     cursor = connection.cursor()
+
+    # delete existing rows for the same symbol and timestamp to avoid duplicates (idempotent insert)
+    cursor.execute("DELETE FROM TickData WHERE Symbol = ? AND Interval = ? AND Timestamp >= ?", (symbol, interval, values[0][2]))
+
     cursor.executemany(
         "INSERT INTO TickData (Symbol, Interval, Timestamp, Open, High, Low, Close, Volume, UpdateDatetime) VALUES (?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)",
         values

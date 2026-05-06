@@ -6,19 +6,28 @@ import pandas as pd
 import matplotlib.dates as mdates
 import mplfinance as mpf
 import mplcursors
+from zoneinfo import ZoneInfo
 
 # inherit logging configuration from main.py
 logger = logging.getLogger(__name__)
 
 def candlestick_chart(data):
-    # 1. Convert TickData_generate output to DataFrame
-    df = pd.DataFrame(data['values'])
-    df['Timestamp'] = pd.to_datetime(df['Timestamp'])
-    df.set_index('Timestamp', inplace=True)
-
     # Extract meta data
     symbol = data['meta']['Symbol']
     interval = data['meta']['Interval']
+
+
+    # 1. Convert TickData_generate output to DataFrame
+    df = pd.DataFrame(data['values'])
+    
+    # If the interval is daily, we can treat timestamps as naive datetime objects. 
+    # For intraday data, we need to handle timezones properly.
+    if interval == '1d':
+        df['Timestamp'] = pd.to_datetime(df['Timestamp'])
+    else:
+        df['Timestamp'] = pd.to_datetime(df['Timestamp']).dt.tz_localize('UTC').dt.tz_convert(ZoneInfo(data['meta']['Timezone']))
+
+    df.set_index('Timestamp', inplace=True)
 
     # 2. Calculate MACD (12, 26, 9)
     # EMA 12 and EMA 26
@@ -58,13 +67,6 @@ def candlestick_chart(data):
     ax1.bar(down['x'], down.High - down.Open, width2, bottom=down.Open, color='#f6465d')
     ax1.bar(down['x'], down.Low - down.Close, width2, bottom=down.Close, color='#f6465d')
 
-    # Plot MACD lines on price chart
-    ax1_twin = ax1.twinx()
-    ax1_twin.plot(df['x'], df['MACD'], label='MACD Line (12, 26)', color='#2196f3', linewidth=1.5)
-    ax1_twin.plot(df['x'], df['Signal'], label='Signal Line (9)', color='#ffa500', linewidth=1.5)
-    ax1_twin.set_ylabel('MACD', fontsize=12, color='#e8e8e8')
-    ax1_twin.tick_params(colors='#e8e8e8')
-
     # Add hoverable points for tooltip annotations
     hover_points = ax1.scatter(df['x'], df['Close'], s=100, alpha=0.0, picker=True)
     date_format = '%d-%b-%Y' if interval == '1d' else '%d-%b %H:%M'
@@ -98,13 +100,20 @@ def candlestick_chart(data):
     colors = ['#0ecb81' if val >= 0 else '#f6465d' for val in df['Histogram']]
     ax2.bar(df['x'], df['Histogram'], width=width, color=colors, alpha=0.5)
 
+    # Plot MACD lines on histogram chart
+    ax2_twin = ax2.twinx()
+    ax2_twin.plot(df['x'], df['MACD'], label='MACD Line (12, 26)', color='#2196f3', linewidth=1.5)
+    ax2_twin.plot(df['x'], df['Signal'], label='Signal Line (9)', color='#ffa500', linewidth=1.5)
+    ax2_twin.set_ylabel('MACD', fontsize=12, color='#e8e8e8')
+    ax2_twin.tick_params(colors='#e8e8e8')
+
     ax2.set_ylabel('MACD Histogram', fontsize=12, color='#e8e8e8')
     ax2.set_xlabel('Date' if interval == "1d" else 'Date & Time', fontsize=12, color='#e8e8e8')
     ax2.tick_params(colors='#e8e8e8')
     ax2.grid(True, linestyle='--', alpha=0.2, color='#4a4a4a')
 
-    # Create legend for MACD lines on ax1_twin
-    legend = ax1_twin.legend(loc='upper left', fancybox=True, shadow=False)
+    # Create legend for MACD lines on ax2_twin
+    legend = ax2_twin.legend(loc='upper left', fancybox=True, shadow=False)
     legend.get_frame().set_facecolor('#1a1a1a')
     legend.get_frame().set_edgecolor('#4a4a4a')
     for text in legend.get_texts():
