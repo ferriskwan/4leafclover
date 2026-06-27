@@ -5,7 +5,7 @@ import logging
 from dotenv import load_dotenv
 import ProcessData as pd
 import marketdata as md
-import sqlite3
+import psycopg2
 
 # Load environment variables from .env file
 load_dotenv()
@@ -21,7 +21,7 @@ try:
     cursor = conn1.cursor()
     
     # Update SysValue.GLOBAL_TODAY to current date. This is used as a reference point for pulling data and for logging.
-    cursor.execute("UPDATE SysValue SET DateValue = date(CURRENT_TIMESTAMP) WHERE Name = 'GLOBAL_TODAY'")
+    cursor.execute("UPDATE SysValue SET DateValue = CURRENT_DATE WHERE Name = 'GLOBAL_TODAY'")
     conn1.commit()
     
     # Query SysValue table for global dates
@@ -29,10 +29,14 @@ try:
     cursor.execute("select Name, DateValue from SysValue where Name in ('GLOBAL_STARTDATE', 'GLOBAL_TODAY')")
     sys_values = cursor.fetchall()
     sys_dict = {row[0]: row[1] for row in sys_values}
-    global_startdate = sys_dict.get('GLOBAL_STARTDATE', '2025-01-01')
-    global_today = sys_dict.get('GLOBAL_TODAY', '2026-04-01')
+    global_startdate_raw = sys_dict.get('GLOBAL_STARTDATE', '2025-01-01')
+    global_today_raw = sys_dict.get('GLOBAL_TODAY', '2026-04-01')
+    
+    global_startdate = global_startdate_raw.strftime('%Y-%m-%d') if hasattr(global_startdate_raw, 'strftime') else str(global_startdate_raw).split()[0]
+    global_today = global_today_raw.strftime('%Y-%m-%d') if hasattr(global_today_raw, 'strftime') else str(global_today_raw).split()[0]
+    
     logger.info(f"[main.py]: Global start date is {global_startdate}, Global today is {global_today}")
-except sqlite3.Error as e:
+except psycopg2.Error as e:
     logger.error(f"[main.py]: Database error during initialization: {e}", exc_info=True)
     raise
 except Exception as e:
@@ -68,8 +72,8 @@ logger.debug(f"[main.py]: Processed data directory is {processedDataDir}")
 try:
     cursor.execute("""
         select w.Symbol, 
-        (case when max(e.Date) is NULL then ? 
-        else max(date(max(e.Date),'+1 day'), date(?)) end) 
+        (case when max(e.Date) is NULL then CAST(%s AS date) 
+        else GREATEST((max(e.Date) + INTERVAL '1 day')::date, CAST(%s AS date)) end) 
         from WatchList w left join EODData e on w.Symbol=e.Symbol group by w.Symbol
         """, (global_startdate, global_startdate))
     logger.debug("[main.py]: Retrieved symbols from WatchList for EODData")
@@ -95,7 +99,7 @@ try:
         except Exception as e:
             logger.error("[main.py].EODData: Error processing symbol %s: %s", symbol, e, exc_info=True)
             continue
-except sqlite3.Error as e:
+except psycopg2.Error as e:
     logger.error("[main.py]: Database error retrieving EODData symbols: %s", e, exc_info=True)
 except Exception as e:
     logger.error("[main.py]: Unexpected error in EODData processing: %s", e, exc_info=True)
@@ -107,8 +111,8 @@ except Exception as e:
 try:
     cursor.execute("""
         select w.Symbol, 
-        (case when max(e.Timestamp) is NULL then date(?, '-7 days') 
-        else max(date(max(e.Timestamp)), date(?, '-7 days')) end) 
+        (case when max(e.Timestamp) is NULL then (CAST(%s AS date) - INTERVAL '7 days')::date 
+        else GREATEST(max(e.Timestamp)::date, (CAST(%s AS date) - INTERVAL '7 days')::date) end) 
         from WatchList w left join TickData e on w.Symbol=e.Symbol group by w.Symbol
         """, (global_today, global_today))
     logger.debug("[main.py].TickData: Retrieved symbols from WatchList for TickData")
@@ -134,7 +138,7 @@ try:
         except Exception as e:
             logger.error("[main.py].TickData: Error processing symbol %s: %s", symbol, e, exc_info=True)
             continue
-except sqlite3.Error as e:
+except psycopg2.Error as e:
     logger.error("[main.py]: Database error retrieving TickData symbols: %s", e, exc_info=True)
 except Exception as e:
     logger.error("[main.py]: Unexpected error in TickData processing: %s", e, exc_info=True)

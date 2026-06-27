@@ -1,20 +1,52 @@
 from pathlib import Path
 import os
-import sqlite3
 import logging
-# import marketdata as md
+import psycopg2
+from dotenv import load_dotenv
+
+load_dotenv()
+
 parentDir = os.getcwd()
 
 # inherit logging configuration from main.py
 logger = logging.getLogger(__name__)
 logger.debug(f"[ProcessData.py]: Parent directory: {parentDir}")
 
-# Returns a connection to the clover.db SQLite database
-def connect_clover():
-    logger.debug("[ProcessData.py].connect_clover(): connect to clover.db")
-    return sqlite3.connect(os.path.join(parentDir, 'SQLite', 'clover.db'))
 
-# Inserts from a json or dict data structure into the TickData table in the clover.db SQLite database
+def _get_db_config():
+    """Build PostgreSQL connection parameters from environment variables."""
+    public_ip = os.getenv("DB_PUBLIC_IP") or os.getenv("DB_HOST")
+    if not public_ip:
+        raise RuntimeError("DB_PUBLIC_IP or DB_HOST must be set")
+
+    if ":" in public_ip and public_ip.count(":") >= 2 and not os.getenv("DB_PUBLIC_IP"):
+        raise RuntimeError(
+            "DB_HOST appears to be a Cloud SQL instance connection name. Set DB_PUBLIC_IP to the public IP address."
+        )
+
+    db_name = os.getenv("DB_NAME")
+    db_user = os.getenv("DB_USER")
+    db_password = os.getenv("DB_PASSWORD")
+
+    if not db_name or not db_user or not db_password:
+        raise RuntimeError("DB_NAME, DB_USER, and DB_PASSWORD must be configured")
+
+    return {
+        "host": public_ip,
+        "port": int(os.getenv("DB_PORT", "5432")),
+        "dbname": db_name,
+        "user": db_user,
+        "password": db_password,
+        "sslmode": os.getenv("DB_SSLMODE", "require"),
+    }
+
+
+def connect_clover():
+    """Return a PostgreSQL connection to the Clover database."""
+    logger.debug("[ProcessData.py].connect_clover(): connect to PostgreSQL")
+    return psycopg2.connect(**_get_db_config())
+
+# Inserts from a json or dict data structure into the TickData table in the PostgreSQL database
 def insert_Tickdata(connection, data):
     if not data or 'values' not in data:
         logger.warning("[ProcessData.py].insert_tickdata(): No tick data to insert")
@@ -45,10 +77,10 @@ def insert_Tickdata(connection, data):
     cursor = connection.cursor()
 
     # delete existing rows for the same symbol and timestamp to avoid duplicates (idempotent insert)
-    cursor.execute("DELETE FROM TickData WHERE Symbol = ? AND Interval = ? AND Timestamp >= ?", (symbol, interval, values[0][2]))
+    cursor.execute("DELETE FROM TickData WHERE Symbol = %s AND Interval = %s AND Timestamp >= %s", (symbol, interval, values[0][2]))
 
     cursor.executemany(
-        "INSERT INTO TickData (Symbol, Interval, Timestamp, Open, High, Low, Close, Volume, UpdateDatetime) VALUES (?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)",
+        "INSERT INTO TickData (Symbol, Interval, Timestamp, Open, High, Low, Close, Volume, UpdateDatetime) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, CURRENT_TIMESTAMP)",
         values
     )
     connection.commit()
@@ -86,10 +118,10 @@ def insert_EODData(connection, data):
     cursor = connection.cursor()
     
     # delete existing rows for the same symbol and date to avoid duplicates (idempotent insert)
-    cursor.execute("DELETE FROM EODData WHERE Symbol = ? AND Date >= ?", (symbol, values[0][1]))
+    cursor.execute("DELETE FROM EODData WHERE Symbol = %s AND Date >= %s", (symbol, values[0][1]))
     
     cursor.executemany(
-        "INSERT INTO EODData (Symbol, Date, Open, High, Low, Close, Volume, UpdateDatetime) VALUES (?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)",
+        "INSERT INTO EODData (Symbol, Date, Open, High, Low, Close, Volume, UpdateDatetime) VALUES (%s, %s, %s, %s, %s, %s, %s, CURRENT_TIMESTAMP)",
         values
     )
     connection.commit()
@@ -115,7 +147,7 @@ def TickData_generate(connection, symbol):
     cursor = connection.cursor()
     
     # Query WatchList to get Symbol and WatchList
-    cursor.execute("SELECT Symbol, WatchListName, Name, Timezone FROM WatchList WHERE Symbol = ?", (symbol,))
+    cursor.execute("SELECT Symbol, WatchListName, Name, Timezone FROM WatchList WHERE Symbol = %s", (symbol,))
     watchlist_row = cursor.fetchone()
     
     if not watchlist_row:
@@ -126,7 +158,7 @@ def TickData_generate(connection, symbol):
     
     # Query TickData to get Interval and OHLCV data
     cursor.execute(
-        "SELECT Interval, Timestamp, Open, High, Low, Close, Volume FROM TickData WHERE Symbol = ? ORDER BY Timestamp",
+        "SELECT Interval, Timestamp, Open, High, Low, Close, Volume FROM TickData WHERE Symbol = %s ORDER BY Timestamp",
         (symbol,)
     )
     tick_rows = cursor.fetchall()
@@ -187,7 +219,7 @@ def EODData_generate(connection, symbol):
     cursor = connection.cursor()
     
     # Query WatchList to get Symbol and WatchList
-    cursor.execute("SELECT Symbol, WatchListName, Name, Timezone FROM WatchList WHERE Symbol = ?", (symbol,))
+    cursor.execute("SELECT Symbol, WatchListName, Name, Timezone FROM WatchList WHERE Symbol = %s", (symbol,))
     watchlist_row = cursor.fetchone()
     
     if not watchlist_row:
@@ -198,7 +230,7 @@ def EODData_generate(connection, symbol):
     
     # Query EODData to get market close data
     cursor.execute(
-        "SELECT Date, datetime(Date) as Timestamnp, Open, High, Low, Close, Volume FROM EODData WHERE Symbol = ? ORDER BY Date",
+        "SELECT Date, Date::timestamp as Timestamnp, Open, High, Low, Close, Volume FROM EODData WHERE Symbol = %s ORDER BY Date",
         (symbol,)
     )
     eod_rows = cursor.fetchall()
