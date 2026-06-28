@@ -1,7 +1,9 @@
 from pathlib import Path
 import os
 import logging
+from typing import Dict, Any, Optional
 import psycopg2
+import psycopg2.extensions
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -13,7 +15,7 @@ logger = logging.getLogger(__name__)
 logger.debug(f"[ProcessData.py]: Parent directory: {parentDir}")
 
 
-def _get_db_config():
+def _get_db_config() -> Dict[str, Any]:
     """Build PostgreSQL connection parameters from environment variables."""
     public_ip = os.getenv("DB_PUBLIC_IP") or os.getenv("DB_HOST")
     if not public_ip:
@@ -27,13 +29,14 @@ def _get_db_config():
     db_name = os.getenv("DB_NAME")
     db_user = os.getenv("DB_USER")
     db_password = os.getenv("DB_PASSWORD")
+    db_port = os.getenv("DB_PORT")
 
-    if not db_name or not db_user or not db_password:
-        raise RuntimeError("DB_NAME, DB_USER, and DB_PASSWORD must be configured")
+    if not db_name or not db_user or not db_password or not db_port:
+        raise RuntimeError("DB_NAME, DB_USER, DB_PASSWORD, and DB_PORT must be configured")
 
     return {
         "host": public_ip,
-        "port": int(os.getenv("DB_PORT", "5432")),
+        "port": int(db_port),
         "dbname": db_name,
         "user": db_user,
         "password": db_password,
@@ -41,13 +44,13 @@ def _get_db_config():
     }
 
 
-def connect_clover():
+def connect_clover() -> psycopg2.extensions.connection:
     """Return a PostgreSQL connection to the Clover database."""
     logger.debug("[ProcessData.py].connect_clover(): connect to PostgreSQL")
     return psycopg2.connect(**_get_db_config())
 
 # Inserts from a json or dict data structure into the TickData table in the PostgreSQL database
-def insert_Tickdata(connection, data):
+def insert_Tickdata(connection: psycopg2.extensions.connection, data: Dict[str, Any]) -> int:
     if not data or 'values' not in data:
         logger.warning("[ProcessData.py].insert_tickdata(): No tick data to insert")
         return 0
@@ -80,14 +83,14 @@ def insert_Tickdata(connection, data):
     cursor.execute("DELETE FROM TickData WHERE Symbol = %s AND Interval = %s AND Timestamp >= %s", (symbol, interval, values[0][2]))
 
     cursor.executemany(
-        "INSERT INTO TickData (Symbol, Interval, Timestamp, Open, High, Low, Close, Volume, UpdateDatetime) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, CURRENT_TIMESTAMP)",
+        "INSERT INTO TickData (Symbol, Interval, Timestamp, Open, High, Low, Close, Volume, UpdateTimestamp) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, CURRENT_TIMESTAMP)",
         values
     )
     connection.commit()
     logger.debug("[ProcessData.py].insert_tickdata(): Inserted %d rows for symbol %s", cursor.rowcount, symbol)
     return cursor.rowcount
 
-def insert_EODData(connection, data):
+def insert_EODData(connection: psycopg2.extensions.connection, data: Dict[str, Any]) -> int:
     if not data or 'values' not in data:
         logger.warning("[ProcessData.py].insert_EODData(): No EOD data to insert")
         return 0
@@ -121,7 +124,7 @@ def insert_EODData(connection, data):
     cursor.execute("DELETE FROM EODData WHERE Symbol = %s AND Date >= %s", (symbol, values[0][1]))
     
     cursor.executemany(
-        "INSERT INTO EODData (Symbol, Date, Open, High, Low, Close, Volume, UpdateDatetime) VALUES (%s, %s, %s, %s, %s, %s, %s, CURRENT_TIMESTAMP)",
+        "INSERT INTO EODData (Symbol, Date, Open, High, Low, Close, Volume, UpdateTimestamp) VALUES (%s, %s, %s, %s, %s, %s, %s, CURRENT_TIMESTAMP)",
         values
     )
     connection.commit()
@@ -129,18 +132,18 @@ def insert_EODData(connection, data):
     return cursor.rowcount
 
 
-def TickData_generate(connection, symbol):
+def TickData_generate(connection: psycopg2.extensions.connection, symbol: str) -> Optional[Dict[str, Any]]:
     """
     Generates a dictionary object containing tick data and metadata for charting.
     
     Args:
-        connection: SQLite database connection to clover.db
+        connection: psycopg2 connection to the PostgreSQL database
         symbol: The stock symbol to retrieve data for
         
     Returns:
         A dictionary with:
-        - "meta": Contains reference data (Symbol, WatchList, Interval, Name, Timezone)
-        - "values": List of tick data records (Timestamp, Open, High, Low, Close, Volume) sorted by Timestamp
+        - "meta": Contains reference data (symbol, watchlist, interval, name, timezone)
+        - "values": List of tick data records (timestamp, open, high, low, close, volume) sorted by timestamp
     """
     logger.debug("[ProcessData.py].TickData_generate(): Generating tick data for symbol %s", symbol)
     
@@ -170,25 +173,25 @@ def TickData_generate(connection, symbol):
     # Get interval from first row (should be same for all)
     interval = tick_rows[0][0]
     
-    # Build the values list with tick data sorted by timestamp
+    # Build the values list with tick data sorted by timestamp (normalized to lowercase keys)
     values = []
     for row in tick_rows:
         values.append({
-            'Timestamp': row[1],
-            'Open': row[2],
-            'High': row[3],
-            'Low': row[4],
-            'Close': row[5],
-            'Volume': row[6]
+            'timestamp': row[1],
+            'open': row[2],
+            'high': row[3],
+            'low': row[4],
+            'close': row[5],
+            'volume': row[6]
         })
     
-    # Build the meta dictionary
+    # Build the meta dictionary (normalized to lowercase keys)
     meta = {
-        'Symbol': watchlist_symbol,
-        'WatchList': watchlist_name,
-        'Interval': interval,
-        'Name': name,
-        'Timezone': timezone
+        'symbol': watchlist_symbol,
+        'watchlist': watchlist_name,
+        'interval': interval,
+        'name': name,
+        'timezone': timezone
     }
     
     # Build and return the final data dictionary
@@ -201,18 +204,18 @@ def TickData_generate(connection, symbol):
     return data
 
 
-def EODData_generate(connection, symbol):
+def EODData_generate(connection: psycopg2.extensions.connection, symbol: str) -> Optional[Dict[str, Any]]:
     """
     Generates a dictionary object containing end-of-day market data and metadata for charting.
     
     Args:
-        connection: SQLite database connection to clover.db
+        connection: psycopg2 connection to the PostgreSQL database
         symbol: The stock symbol to retrieve data for
         
     Returns:
         A dictionary with:
-        - "meta": Contains reference data (Symbol, WatchList, Interval='1d', Name, Timezone)
-        - "values": List of EOD records (Date, Open, High, Low, Close, Volume) sorted by Date
+        - "meta": Contains reference data (symbol, watchlist, interval='1d', name, timezone)
+        - "values": List of EOD records (date, timestamp, open, high, low, close, volume) sorted by date
     """
     logger.debug("[ProcessData.py].EODData_generate(): Generating EOD data for symbol %s", symbol)
     
@@ -230,7 +233,7 @@ def EODData_generate(connection, symbol):
     
     # Query EODData to get market close data
     cursor.execute(
-        "SELECT Date, Date::timestamp as Timestamnp, Open, High, Low, Close, Volume FROM EODData WHERE Symbol = %s ORDER BY Date",
+        "SELECT Date, Date::timestamp as Timestamp, Open, High, Low, Close, Volume FROM EODData WHERE Symbol = %s ORDER BY Date",
         (symbol,)
     )
     eod_rows = cursor.fetchall()
@@ -239,26 +242,26 @@ def EODData_generate(connection, symbol):
         logger.warning("[ProcessData.py].EODData_generate(): No EODData found for symbol %s", symbol)
         return None
     
-    # Build the values list with EOD data sorted by date
+    # Build the values list with EOD data sorted by date (normalized to lowercase keys)
     values = []
     for row in eod_rows:
         values.append({
-            'Date': row[0],
-            'Timestamp': row[1],
-            'Open': row[2],
-            'High': row[3],
-            'Low': row[4],
-            'Close': row[5],
-            'Volume': row[6]
+            'date': row[0],
+            'timestamp': row[1],
+            'open': row[2],
+            'high': row[3],
+            'low': row[4],
+            'close': row[5],
+            'volume': row[6]
         })
     
-    # Build the meta dictionary with hardcoded interval '1d'
+    # Build the meta dictionary with hardcoded interval '1d' (normalized to lowercase keys)
     meta = {
-        'Symbol': watchlist_symbol,
-        'WatchList': watchlist_name,
-        'Interval': '1d',
-        'Name': name,
-        'Timezone': timezone
+        'symbol': watchlist_symbol,
+        'watchlist': watchlist_name,
+        'interval': '1d',
+        'name': name,
+        'timezone': timezone
     }
     
     # Build and return the final data dictionary

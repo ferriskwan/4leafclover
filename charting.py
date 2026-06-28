@@ -1,5 +1,6 @@
 import json
 import logging
+from typing import Dict, Any, Optional
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
@@ -11,10 +12,10 @@ from zoneinfo import ZoneInfo
 # inherit logging configuration from main.py
 logger = logging.getLogger(__name__)
 
-def candlestick_chart(data):
+def candlestick_chart(data: Dict[str, Any]) -> None:
     # Extract meta data
-    symbol = data['meta']['Symbol']
-    interval = data['meta']['Interval']
+    symbol = data['meta']['symbol']
+    interval = data['meta']['interval']
 
 
     # 1. Convert TickData_generate output to DataFrame
@@ -23,16 +24,17 @@ def candlestick_chart(data):
     # If the interval is daily, we can treat timestamps as naive datetime objects. 
     # For intraday data, we need to handle timezones properly.
     if interval == '1d':
-        df['Timestamp'] = pd.to_datetime(df['Timestamp'])
+        df['timestamp'] = pd.to_datetime(df['timestamp'])
     else:
-        df['Timestamp'] = pd.to_datetime(df['Timestamp']).dt.tz_localize('UTC').dt.tz_convert(ZoneInfo(data['meta']['Timezone']))
+        timezone = data['meta'].get('timezone') or 'UTC'
+        df['timestamp'] = pd.to_datetime(df['timestamp']).dt.tz_localize('UTC').dt.tz_convert(ZoneInfo(timezone))
 
-    df.set_index('Timestamp', inplace=True)
+    df.set_index('timestamp', inplace=True)
 
     # 2. Calculate MACD (12, 26, 9)
     # EMA 12 and EMA 26
-    df['EMA12'] = df['Close'].ewm(span=12, adjust=False).mean()
-    df['EMA26'] = df['Close'].ewm(span=26, adjust=False).mean()
+    df['EMA12'] = df['close'].ewm(span=12, adjust=False).mean()
+    df['EMA26'] = df['close'].ewm(span=26, adjust=False).mean()
 
     df['MACD'] = df['EMA12'] - df['EMA26']
     df['Signal'] = df['MACD'].ewm(span=9, adjust=False).mean()
@@ -54,21 +56,21 @@ def candlestick_chart(data):
     # Plot Candlesticks
     width = 0.6
     width2 = 0.1
-    up = df[df.Close >= df.Open]
-    down = df[df.Close < df.Open]
+    up = df[df.close >= df.open]
+    down = df[df.close < df.open]
 
     # Up candles (Binance bright green)
-    ax1.bar(up['x'], up.Close - up.Open, width, bottom=up.Open, color='#0ecb81', edgecolor='#0ecb81')
-    ax1.bar(up['x'], up.High - up.Close, width2, bottom=up.Close, color='#0ecb81')
-    ax1.bar(up['x'], up.Low - up.Open, width2, bottom=up.Open, color='#0ecb81')
+    ax1.bar(up['x'], up.close - up.open, width, bottom=up.open, color='#0ecb81', edgecolor='#0ecb81')
+    ax1.bar(up['x'], up.high - up.close, width2, bottom=up.close, color='#0ecb81')
+    ax1.bar(up['x'], up.low - up.open, width2, bottom=up.open, color='#0ecb81')
 
     # Down candles (Binance bright red)
-    ax1.bar(down['x'], down.Close - down.Open, width, bottom=down.Open, color='#f6465d', edgecolor='#f6465d')
-    ax1.bar(down['x'], down.High - down.Open, width2, bottom=down.Open, color='#f6465d')
-    ax1.bar(down['x'], down.Low - down.Close, width2, bottom=down.Close, color='#f6465d')
+    ax1.bar(down['x'], down.close - down.open, width, bottom=down.open, color='#f6465d', edgecolor='#f6465d')
+    ax1.bar(down['x'], down.high - down.open, width2, bottom=down.open, color='#f6465d')
+    ax1.bar(down['x'], down.low - down.close, width2, bottom=down.close, color='#f6465d')
 
     # Add hoverable points for tooltip annotations
-    hover_points = ax1.scatter(df['x'], df['Close'], s=100, alpha=0.0, picker=True)
+    hover_points = ax1.scatter(df['x'], df['close'], s=100, alpha=0.0, picker=True)
     date_format = '%d-%b-%Y' if interval == '1d' else '%d-%b %H:%M'
     
     cursor = mplcursors.cursor(hover_points, hover=True)
@@ -81,11 +83,11 @@ def candlestick_chart(data):
                 row = df.iloc[idx]
                 dt = row.name.strftime(date_format)
                 sel.annotation.set(text=(f"{dt}\n"
-                                         f"O: {row['Open']:.2f}\n"
-                                         f"H: {row['High']:.2f}\n"
-                                         f"L: {row['Low']:.2f}\n"
-                                         f"C: {row['Close']:.2f}\n"
-                                         f"V: {int(row['Volume']):,}"))
+                                         f"O: {row['open']:.2f}\n"
+                                         f"H: {row['high']:.2f}\n"
+                                         f"L: {row['low']:.2f}\n"
+                                         f"C: {row['close']:.2f}\n"
+                                         f"V: {int(row['volume']):,}"))
                 sel.annotation.get_bbox_patch().set(fc='#666666', alpha=0.95, edgecolor='#4a4a4a')
                 sel.annotation.get_text().set_color('#ffffff')
         except Exception as e:
@@ -136,9 +138,9 @@ def candlestick_chart(data):
     plt.savefig(f'{symbol}_macd_candlestick.png')
     plt.show()
 
-def marketclose_chart(data):
+def marketclose_chart(data: Dict[str, Any]) -> None:
     # Extract datetime and close values from the API response
-    datetimes = [item["datetime"] for item in data["values"]]
+    datetimes = [item["date"] if "date" in item else item["datetime"] for item in data["values"]]
     closes = [float(item["close"]) for item in data["values"]]
 
     # Convert datetime strings to pandas datetime objects
@@ -146,24 +148,29 @@ def marketclose_chart(data):
 
     # Now plot with proper date handling
     plt.figure(figsize=(12, 6))
-    plt.plot(datetimes, closes, linewidth=2, mav=(3,6,9), label='Close Price')
+    df = pd.DataFrame({'close': closes}, index=datetimes)
+    plt.plot(df.index, df['close'], linewidth=2, label='Close Price')
+    for m in (3, 6, 9):
+        ma = df['close'].rolling(window=m).mean()
+        plt.plot(df.index, ma, label=f'{m}-period MA', linestyle='--')
     plt.gca().xaxis.set_major_formatter(mdates.DateFormatter('%Y-%m-%d'))
     plt.xticks(rotation=45)
     plt.xlabel('Date')
     plt.ylabel('Close Price')
     plt.title('Stock Price Over Time')
     plt.grid(True, alpha=0.3)
+    plt.legend()
     plt.tight_layout()
     plt.show()
 
-def daily_chart(data):
+def daily_chart(data: Dict[str, Any]) -> None:
     # Extract datetime, open, high, low, close values from the API response
-    datetimes = [item["Date"] for item in data["values"]]
-    opens = [float(item["Open"]) for item in data["values"]]
-    highs = [float(item["High"]) for item in data["values"]]
-    lows = [float(item["Low"]) for item in data["values"]]
-    closes = [float(item["Close"]) for item in data["values"]]
-    volumes = [float(item["Volume"]) for item in data["values"]]
+    datetimes = [item["date"] if "date" in item else item["datetime"] for item in data["values"]]
+    opens = [float(item["open"]) for item in data["values"]]
+    highs = [float(item["high"]) for item in data["values"]]
+    lows = [float(item["low"]) for item in data["values"]]
+    closes = [float(item["close"]) for item in data["values"]]
+    volumes = [float(item["volume"]) for item in data["values"]]
     
     # Convert datetime strings to pandas datetime objects
     datetimes = pd.to_datetime(datetimes)
