@@ -20,7 +20,15 @@ import requests
 from typing import Tuple, List, Dict, Any
 
 # Initialize logging base config
-logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(levelname)s - %(message)s')
+# Configure console to show only INFO and above to avoid terminal clutter
+console_handler = logging.StreamHandler()
+console_handler.setLevel(logging.INFO)
+console_handler.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(message)s'))
+
+logging.basicConfig(
+    level=logging.DEBUG,  # Allow root logger to capture DEBUG logs for the file
+    handlers=[console_handler]
+)
 logger = logging.getLogger(__name__)
 
 def setup_file_logging(parentDir: str, global_today: str) -> None:

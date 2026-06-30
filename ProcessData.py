@@ -161,8 +161,14 @@ def TickData_generate(connection: psycopg2.extensions.connection, symbol: str) -
     
     # Query TickData to get Interval and OHLCV data
     cursor.execute(
-        "SELECT Interval, Timestamp, Open, High, Low, Close, Volume FROM TickData WHERE Symbol = %s ORDER BY Timestamp",
-        (symbol,)
+        """
+        SELECT Interval, Timestamp, Open, High, Low, Close, Volume 
+        FROM TickData 
+        WHERE Symbol = %s 
+          AND Timestamp >= (SELECT CAST(MAX(Timestamp) AS date) - INTERVAL '7 days' FROM TickData WHERE Symbol = %s)
+        ORDER BY Timestamp
+        """,
+        (symbol, symbol)
     )
     tick_rows = cursor.fetchall()
     
@@ -233,8 +239,14 @@ def EODData_generate(connection: psycopg2.extensions.connection, symbol: str) ->
     
     # Query EODData to get market close data
     cursor.execute(
-        "SELECT Date, Date::timestamp as Timestamp, Open, High, Low, Close, Volume FROM EODData WHERE Symbol = %s ORDER BY Date",
-        (symbol,)
+        """
+        SELECT Date, Date::timestamp as Timestamp, Open, High, Low, Close, Volume 
+        FROM EODData 
+        WHERE Symbol = %s 
+          AND Date >= (SELECT CAST(MAX(Date::timestamp) AS date) - INTERVAL '2 years' FROM EODData WHERE Symbol = %s)
+        ORDER BY Date
+        """,
+        (symbol, symbol)
     )
     eod_rows = cursor.fetchall()
     
