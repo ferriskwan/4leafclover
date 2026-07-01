@@ -6,6 +6,7 @@ import csv
 from typing import Dict, Any, Optional, Union
 import psycopg2
 import psycopg2.extensions
+import psycopg2.pool
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -58,6 +59,53 @@ def connect_clover() -> psycopg2.extensions.connection:
     """Return a PostgreSQL connection to the Clover database."""
     logger.debug("[ProcessData.py].connect_clover(): connect to PostgreSQL")
     return psycopg2.connect(**_get_db_config())
+
+
+_db_pool = None
+
+
+def init_pool(minconn: int = 1, maxconn: int = 20):
+    """Initialize a ThreadedConnectionPool for database connections."""
+    global _db_pool
+    if _db_pool is None:
+        try:
+            _db_pool = psycopg2.pool.ThreadedConnectionPool(minconn, maxconn, **_get_db_config())
+            logger.info("[ProcessData.py]: Database connection pool initialized successfully")
+        except Exception as e:
+            logger.error(f"[ProcessData.py]: Failed to initialize database connection pool: {e}", exc_info=True)
+            raise
+
+
+def close_pool():
+    """Safely close all pooled connections."""
+    global _db_pool
+    if _db_pool is not None:
+        try:
+            _db_pool.closeall()
+            logger.info("[ProcessData.py]: Database connection pool closed")
+        except Exception as e:
+            logger.error(f"[ProcessData.py]: Error closing connection pool: {e}", exc_info=True)
+        finally:
+            _db_pool = None
+
+
+def get_connection() -> psycopg2.extensions.connection:
+    """Retrieve a connection from the pool, or fallback to a direct connection."""
+    global _db_pool
+    if _db_pool is None:
+        logger.debug("[ProcessData.py]: No pool initialized; fallback to direct connect_clover()")
+        return connect_clover()
+    return _db_pool.getconn()
+
+
+def put_connection(conn: psycopg2.extensions.connection):
+    """Return a connection to the pool, or close it if direct."""
+    global _db_pool
+    if conn:
+        if _db_pool is not None:
+            _db_pool.putconn(conn)
+        else:
+            conn.close()
 
 # Inserts from a json or dict data structure into the TickData table in the PostgreSQL database
 def insert_Tickdata(connection: psycopg2.extensions.connection, data: Dict[str, Any]) -> int:

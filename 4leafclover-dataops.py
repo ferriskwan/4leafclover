@@ -2,29 +2,44 @@ import os
 import logging
 from typing import Dict, Any, List
 from dotenv import load_dotenv
+import datetime
+from contextlib import asynccontextmanager
 
 # Load env variables
 load_dotenv()
 from enum import Enum
-from fastapi import FastAPI, HTTPException, Security, Depends, Response
+from fastapi import FastAPI, HTTPException, Security, Depends, Response, Path, Query
 from fastapi.responses import FileResponse
 from fastapi.security.api_key import APIKeyHeader
 from pydantic import BaseModel
 import ProcessData as pd
 import psycopg2
 
-# Configure logging
-logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(levelname)s - %(message)s')
+# Configure logger
 logger = logging.getLogger(__name__)
+
+
+# Database connection pool lifespan manager
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Initialize connection pool
+    pd.init_pool(minconn=1, maxconn=10)
+    yield
+    # Close connection pool
+    pd.close_pool()
+
 
 app = FastAPI(
     title="4leafclover Data Operations API",
     description="Exposes ProcessData.py functions and database SQL operations via REST endpoints.",
-    version="1.0.0"
+    version="1.0.0",
+    lifespan=lifespan
 )
 
 # API Key Authentication
-API_KEY = os.getenv("API_KEY", "clover-secure-token-123")
+API_KEY = os.getenv("API_KEY")
+if not API_KEY:
+    raise RuntimeError("API_KEY environment variable is not configured. Please set it in your environment or .env file.")
 api_key_header = APIKeyHeader(name="X-API-KEY", auto_error=True)
 
 def verify_api_key(api_key: str = Depends(api_key_header)) -> str:
@@ -56,7 +71,7 @@ def sys_init() -> Dict[str, str]:
     """
     logger.info("Initializing system dates in database")
     try:
-        conn = pd.connect_clover()
+        conn = pd.get_connection()
         cursor = conn.cursor()
         
         # Update GLOBAL_TODAY to current date
@@ -87,18 +102,20 @@ def sys_init() -> Dict[str, str]:
         raise HTTPException(status_code=500, detail=str(e))
     finally:
         if 'conn' in locals() and conn:
-            conn.close()
+            pd.put_connection(conn)
 
 
 @app.get("/api/v1/eod/symbols", dependencies=[Depends(verify_api_key)])
-def get_eod_symbols(global_startdate: str) -> List[Dict[str, str]]:
+def get_eod_symbols(
+    global_startdate: datetime.date = Query(..., description="Global start date in YYYY-MM-DD format")
+) -> List[Dict[str, str]]:
     """
     Retrieve symbols queue for EOD data pulling.
     Runs the EODData boundary date calculation query on Cloud SQL.
     """
     logger.info(f"Retrieving EOD symbols for startdate: {global_startdate}")
     try:
-        conn = pd.connect_clover()
+        conn = pd.get_connection()
         cursor = conn.cursor()
         cursor.execute("""
             select w.Symbol, 
@@ -120,18 +137,20 @@ def get_eod_symbols(global_startdate: str) -> List[Dict[str, str]]:
         raise HTTPException(status_code=500, detail=f"Database error: {e}")
     finally:
         if 'conn' in locals() and conn:
-            conn.close()
+            pd.put_connection(conn)
 
 
 @app.get("/api/v1/tick/symbols", dependencies=[Depends(verify_api_key)])
-def get_tick_symbols(global_today: str) -> List[Dict[str, str]]:
+def get_tick_symbols(
+    global_today: datetime.date = Query(..., description="Global today date in YYYY-MM-DD format")
+) -> List[Dict[str, str]]:
     """
     Retrieve symbols queue for Tick data pulling.
     Runs the TickData boundary date calculation query on Cloud SQL.
     """
     logger.info(f"Retrieving Tick symbols for today: {global_today}")
     try:
-        conn = pd.connect_clover()
+        conn = pd.get_connection()
         cursor = conn.cursor()
         cursor.execute("""
             select w.Symbol, 
@@ -153,7 +172,7 @@ def get_tick_symbols(global_today: str) -> List[Dict[str, str]]:
         raise HTTPException(status_code=500, detail=f"Database error: {e}")
     finally:
         if 'conn' in locals() and conn:
-            conn.close()
+            pd.put_connection(conn)
 
 
 @app.post("/api/v1/eod", dependencies=[Depends(verify_api_key)])
@@ -161,7 +180,7 @@ def insert_eod(payload: DataPayload) -> Dict[str, Any]:
     """Insert EOD data payload into the EODData database table."""
     logger.info("Inserting EOD data")
     try:
-        conn = pd.connect_clover()
+        conn = pd.get_connection()
         rows = pd.insert_EODData(conn, payload.model_dump())
         return {"status": "success", "rows_inserted": rows}
     except Exception as e:
@@ -169,7 +188,7 @@ def insert_eod(payload: DataPayload) -> Dict[str, Any]:
         raise HTTPException(status_code=500, detail=str(e))
     finally:
         if 'conn' in locals() and conn:
-            conn.close()
+            pd.put_connection(conn)
 
 
 @app.post("/api/v1/tick", dependencies=[Depends(verify_api_key)])
@@ -177,7 +196,7 @@ def insert_tick(payload: DataPayload) -> Dict[str, Any]:
     """Insert Tick data payload into the TickData database table."""
     logger.info("Inserting Tick data")
     try:
-        conn = pd.connect_clover()
+        conn = pd.get_connection()
         rows = pd.insert_Tickdata(conn, payload.model_dump())
         return {"status": "success", "rows_inserted": rows}
     except Exception as e:
@@ -185,15 +204,18 @@ def insert_tick(payload: DataPayload) -> Dict[str, Any]:
         raise HTTPException(status_code=500, detail=str(e))
     finally:
         if 'conn' in locals() and conn:
-            conn.close()
+            pd.put_connection(conn)
 
 
-@app.get("/api/v1/eod/{symbol}")
-def get_eod_data(symbol: str, format: OutputFormat = OutputFormat.DICT) -> Any:
+@app.get("/api/v1/eod/{symbol}", dependencies=[Depends(verify_api_key)])
+def get_eod_data(
+    symbol: str = Path(..., min_length=1, max_length=15, pattern="^[A-Z0-9.-]+$"),
+    format: OutputFormat = OutputFormat.DICT
+) -> Any:
     """Retrieve EOD charting dataset for a stock symbol."""
     logger.info(f"Generating EOD dataset for symbol {symbol} in format {format}")
     try:
-        conn = pd.connect_clover()
+        conn = pd.get_connection()
         data = pd.EODData_generate(conn, symbol, output_format=format.value)
         if not data:
             raise HTTPException(status_code=404, detail=f"No EOD data found for symbol {symbol}")
@@ -211,15 +233,18 @@ def get_eod_data(symbol: str, format: OutputFormat = OutputFormat.DICT) -> Any:
         raise HTTPException(status_code=500, detail=str(e))
     finally:
         if 'conn' in locals() and conn:
-            conn.close()
+            pd.put_connection(conn)
 
 
-@app.get("/api/v1/tick/{symbol}")
-def get_tick_data(symbol: str, format: OutputFormat = OutputFormat.DICT) -> Any:
+@app.get("/api/v1/tick/{symbol}", dependencies=[Depends(verify_api_key)])
+def get_tick_data(
+    symbol: str = Path(..., min_length=1, max_length=15, pattern="^[A-Z0-9.-]+$"),
+    format: OutputFormat = OutputFormat.DICT
+) -> Any:
     """Retrieve Tick charting dataset for a stock symbol."""
     logger.info(f"Generating Tick dataset for symbol {symbol} in format {format}")
     try:
-        conn = pd.connect_clover()
+        conn = pd.get_connection()
         data = pd.TickData_generate(conn, symbol, output_format=format.value)
         if not data:
             raise HTTPException(status_code=404, detail=f"No Tick data found for symbol {symbol}")
@@ -237,4 +262,10 @@ def get_tick_data(symbol: str, format: OutputFormat = OutputFormat.DICT) -> Any:
         raise HTTPException(status_code=500, detail=str(e))
     finally:
         if 'conn' in locals() and conn:
-            conn.close()
+            pd.put_connection(conn)
+
+
+if __name__ == "__main__":
+    import uvicorn
+    logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(levelname)s - %(message)s')
+    uvicorn.run("4leafclover-dataops:app", host="0.0.0.0", port=8080, reload=True)
