@@ -5,7 +5,9 @@ from dotenv import load_dotenv
 
 # Load env variables
 load_dotenv()
-from fastapi import FastAPI, HTTPException, Security, Depends
+from enum import Enum
+from fastapi import FastAPI, HTTPException, Security, Depends, Response
+from fastapi.responses import FileResponse
 from fastapi.security.api_key import APIKeyHeader
 from pydantic import BaseModel
 import ProcessData as pd
@@ -31,6 +33,12 @@ def verify_api_key(api_key: str = Depends(api_key_header)) -> str:
         logger.warning("API key validation failed")
         raise HTTPException(status_code=403, detail="Could not validate credentials")
     return api_key
+
+
+class OutputFormat(str, Enum):
+    DICT = "dict"
+    JSON = "json"
+    CSV = "csv"
 
 
 # Request payload structures
@@ -181,15 +189,21 @@ def insert_tick(payload: DataPayload) -> Dict[str, Any]:
 
 
 @app.get("/api/v1/eod/{symbol}")
-def get_eod_data(symbol: str) -> Dict[str, Any]:
+def get_eod_data(symbol: str, format: OutputFormat = OutputFormat.DICT) -> Any:
     """Retrieve EOD charting dataset for a stock symbol."""
-    logger.info(f"Generating EOD dataset for symbol {symbol}")
+    logger.info(f"Generating EOD dataset for symbol {symbol} in format {format}")
     try:
         conn = pd.connect_clover()
-        data = pd.EODData_generate(conn, symbol)
+        data = pd.EODData_generate(conn, symbol, output_format=format.value)
         if not data:
             raise HTTPException(status_code=404, detail=f"No EOD data found for symbol {symbol}")
-        return data
+        
+        if format == OutputFormat.CSV:
+            return FileResponse(path=data, media_type="text/csv", filename=f"{symbol}_eod.csv")
+        elif format == OutputFormat.JSON:
+            return Response(content=data, media_type="application/json")
+        else:
+            return data
     except HTTPException:
         raise
     except Exception as e:
@@ -201,15 +215,21 @@ def get_eod_data(symbol: str) -> Dict[str, Any]:
 
 
 @app.get("/api/v1/tick/{symbol}")
-def get_tick_data(symbol: str) -> Dict[str, Any]:
+def get_tick_data(symbol: str, format: OutputFormat = OutputFormat.DICT) -> Any:
     """Retrieve Tick charting dataset for a stock symbol."""
-    logger.info(f"Generating Tick dataset for symbol {symbol}")
+    logger.info(f"Generating Tick dataset for symbol {symbol} in format {format}")
     try:
         conn = pd.connect_clover()
-        data = pd.TickData_generate(conn, symbol)
+        data = pd.TickData_generate(conn, symbol, output_format=format.value)
         if not data:
             raise HTTPException(status_code=404, detail=f"No Tick data found for symbol {symbol}")
-        return data
+        
+        if format == OutputFormat.CSV:
+            return FileResponse(path=data, media_type="text/csv", filename=f"{symbol}_tick.csv")
+        elif format == OutputFormat.JSON:
+            return Response(content=data, media_type="application/json")
+        else:
+            return data
     except HTTPException:
         raise
     except Exception as e:
