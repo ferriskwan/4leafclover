@@ -1,7 +1,9 @@
 from pathlib import Path
 import os
 import logging
-from typing import Dict, Any, Optional
+import json
+import csv
+from typing import Dict, Any, Optional, Union
 import psycopg2
 import psycopg2.extensions
 from dotenv import load_dotenv
@@ -42,6 +44,14 @@ def _get_db_config() -> Dict[str, Any]:
         "password": db_password,
         "sslmode": os.getenv("DB_SSLMODE", "require"),
     }
+
+
+def _json_serialize_helper(obj):
+    """JSON serializer helper for date/datetime objects."""
+    from datetime import datetime, date
+    if isinstance(obj, (datetime, date)):
+        return obj.isoformat()
+    raise TypeError(f"Type {type(obj)} not serializable")
 
 
 def connect_clover() -> psycopg2.extensions.connection:
@@ -132,20 +142,28 @@ def insert_EODData(connection: psycopg2.extensions.connection, data: Dict[str, A
     return cursor.rowcount
 
 
-def TickData_generate(connection: psycopg2.extensions.connection, symbol: str) -> Optional[Dict[str, Any]]:
+def TickData_generate(
+    connection: psycopg2.extensions.connection, 
+    symbol: str, 
+    output_format: str = "dict", 
+    csv_path: Optional[str] = None
+) -> Optional[Union[Dict[str, Any], str]]:
     """
-    Generates a dictionary object containing tick data and metadata for charting.
+    Generates a dictionary, JSON, or CSV file containing tick data and metadata for charting.
     
     Args:
         connection: psycopg2 connection to the PostgreSQL database
         symbol: The stock symbol to retrieve data for
+        output_format: Desired output format: "dict" (Python dict), "json" (JSON string), or "csv" (CSV file path)
+        csv_path: Optional custom file path where the CSV data should be saved if output_format="csv"
         
     Returns:
-        A dictionary with:
-        - "meta": Contains reference data (symbol, watchlist, interval, name, timezone)
-        - "values": List of tick data records (timestamp, open, high, low, close, volume) sorted by timestamp
+        - If output_format="dict": A dictionary with "meta" and "values" keys.
+        - If output_format="json": A serialized JSON string of the dictionary.
+        - If output_format="csv": The file path string where the CSV data was saved.
+        - Returns None if the symbol is not in the WatchList or if no TickData is found.
     """
-    logger.debug("[ProcessData.py].TickData_generate(): Generating tick data for symbol %s", symbol)
+    logger.debug("[ProcessData.py].TickData_generate(): Generating tick data for symbol %s in format %s", symbol, output_format)
     
     cursor = connection.cursor()
     
@@ -200,30 +218,72 @@ def TickData_generate(connection: psycopg2.extensions.connection, symbol: str) -
         'timezone': timezone
     }
     
-    # Build and return the final data dictionary
+    # Build the final data dictionary
     data = {
         'meta': meta,
         'values': values
     }
     
     logger.debug("[ProcessData.py].TickData_generate(): Generated data for symbol %s with %d tick records", symbol, len(values))
-    return data
+    
+    # Return formatted output based on requested format
+    if output_format == "json":
+        # Serialize python dictionary containing datetime objects to JSON
+        return json.dumps(data, default=_json_serialize_helper, indent=4)
+        
+    elif output_format == "csv":
+        # Save to default folder (ProcessedData/) if no path is specified
+        if not csv_path:
+            os.makedirs("ProcessedData", exist_ok=True)
+            csv_path = os.path.join("ProcessedData", f"{symbol}_tick.csv")
+        else:
+            dir_name = os.path.dirname(csv_path)
+            if dir_name:
+                os.makedirs(dir_name, exist_ok=True)
+                
+        # Write tabular values to CSV
+        with open(csv_path, 'w', newline='', encoding='utf-8') as f:
+            writer = csv.DictWriter(f, fieldnames=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+            writer.writeheader()
+            for row in values:
+                writer.writerow({
+                    'timestamp': row['timestamp'].isoformat() if hasattr(row['timestamp'], 'isoformat') else str(row['timestamp']),
+                    'open': row['open'],
+                    'high': row['high'],
+                    'low': row['low'],
+                    'close': row['close'],
+                    'volume': row['volume']
+                })
+        logger.debug("[ProcessData.py].TickData_generate(): CSV file saved at %s", csv_path)
+        return csv_path
+        
+    else:
+        # Default: return native python dictionary
+        return data
 
 
-def EODData_generate(connection: psycopg2.extensions.connection, symbol: str) -> Optional[Dict[str, Any]]:
+def EODData_generate(
+    connection: psycopg2.extensions.connection, 
+    symbol: str, 
+    output_format: str = "dict", 
+    csv_path: Optional[str] = None
+) -> Optional[Union[Dict[str, Any], str]]:
     """
-    Generates a dictionary object containing end-of-day market data and metadata for charting.
+    Generates a dictionary, JSON, or CSV file containing end-of-day market data and metadata for charting.
     
     Args:
         connection: psycopg2 connection to the PostgreSQL database
         symbol: The stock symbol to retrieve data for
+        output_format: Desired output format: "dict" (Python dict), "json" (JSON string), or "csv" (CSV file path)
+        csv_path: Optional custom file path where the CSV data should be saved if output_format="csv"
         
     Returns:
-        A dictionary with:
-        - "meta": Contains reference data (symbol, watchlist, interval='1d', name, timezone)
-        - "values": List of EOD records (date, timestamp, open, high, low, close, volume) sorted by date
+        - If output_format="dict": A dictionary with "meta" and "values" keys.
+        - If output_format="json": A serialized JSON string of the dictionary.
+        - If output_format="csv": The file path string where the CSV data was saved.
+        - Returns None if the symbol is not in the WatchList or if no EODData is found.
     """
-    logger.debug("[ProcessData.py].EODData_generate(): Generating EOD data for symbol %s", symbol)
+    logger.debug("[ProcessData.py].EODData_generate(): Generating EOD data for symbol %s in format %s", symbol, output_format)
     
     cursor = connection.cursor()
     
@@ -276,14 +336,49 @@ def EODData_generate(connection: psycopg2.extensions.connection, symbol: str) ->
         'timezone': timezone
     }
     
-    # Build and return the final data dictionary
+    # Build the final data dictionary
     data = {
         'meta': meta,
         'values': values
     }
     
     logger.debug("[ProcessData.py].EODData_generate(): Generated data for symbol %s with %d EOD records", symbol, len(values))
-    return data
+    
+    # Return formatted output based on requested format
+    if output_format == "json":
+        # Serialize python dictionary containing date/datetime objects to JSON
+        return json.dumps(data, default=_json_serialize_helper, indent=4)
+        
+    elif output_format == "csv":
+        # Save to default folder (ProcessedData/) if no path is specified
+        if not csv_path:
+            os.makedirs("ProcessedData", exist_ok=True)
+            csv_path = os.path.join("ProcessedData", f"{symbol}_eod.csv")
+        else:
+            dir_name = os.path.dirname(csv_path)
+            if dir_name:
+                os.makedirs(dir_name, exist_ok=True)
+                
+        # Write tabular values to CSV
+        with open(csv_path, 'w', newline='', encoding='utf-8') as f:
+            writer = csv.DictWriter(f, fieldnames=['date', 'timestamp', 'open', 'high', 'low', 'close', 'volume'])
+            writer.writeheader()
+            for row in values:
+                writer.writerow({
+                    'date': row['date'].isoformat() if hasattr(row['date'], 'isoformat') else str(row['date']),
+                    'timestamp': row['timestamp'].isoformat() if hasattr(row['timestamp'], 'isoformat') else str(row['timestamp']),
+                    'open': row['open'],
+                    'high': row['high'],
+                    'low': row['low'],
+                    'close': row['close'],
+                    'volume': row['volume']
+                })
+        logger.debug("[ProcessData.py].EODData_generate(): CSV file saved at %s", csv_path)
+        return csv_path
+        
+    else:
+        # Default: return native python dictionary
+        return data
 
 
 
