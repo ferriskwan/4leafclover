@@ -98,14 +98,29 @@ def get_connection() -> psycopg2.extensions.connection:
     return _db_pool.getconn()
 
 
-def put_connection(conn: psycopg2.extensions.connection):
-    """Return a connection to the pool, or close it if direct."""
+def put_connection(conn: psycopg2.extensions.connection, close: bool = False):
+    """Return a connection to the pool, or close/discard it if requested or closed."""
     global _db_pool
     if conn:
+        try:
+            if conn.closed:
+                close = True
+            elif not close:
+                conn.rollback()
+        except Exception as e:
+            logger.warning(f"[ProcessData.py]: Error during connection reset: {e}")
+            close = True
+
         if _db_pool is not None:
-            _db_pool.putconn(conn)
+            try:
+                _db_pool.putconn(conn, close=close)
+            except Exception as e:
+                logger.error(f"[ProcessData.py]: Error returning connection to pool: {e}", exc_info=True)
         else:
-            conn.close()
+            try:
+                conn.close()
+            except Exception:
+                pass
 
 # Inserts from a json or dict data structure into the TickData table in the PostgreSQL database
 def insert_Tickdata(connection: psycopg2.extensions.connection, data: Dict[str, Any]) -> int:
@@ -427,6 +442,307 @@ def EODData_generate(
     else:
         # Default: return native python dictionary
         return data
+
+
+# ==========================================
+# WatchList & Trade Database Operations
+# ==========================================
+
+def get_watchlist(
+    connection: psycopg2.extensions.connection, 
+    watchlistname: Optional[str] = None, 
+    symbol: Optional[str] = None
+) -> List[Dict[str, Any]]:
+    """Retrieve watchlist entries, optionally filtered by watchlistname and symbol."""
+    logger.debug("[ProcessData.py].get_watchlist(): Querying watchlist records")
+    cursor = connection.cursor()
+    query = "SELECT watchlistname, symbol, name, timezone, updatetimestamp FROM watchlist WHERE 1=1"
+    params = []
+    
+    if watchlistname:
+        query += " AND watchlistname = %s"
+        params.append(watchlistname)
+    if symbol:
+        query += " AND symbol = %s"
+        params.append(symbol)
+        
+    query += " ORDER BY watchlistname, symbol"
+    cursor.execute(query, params)
+    
+    results = []
+    for row in cursor.fetchall():
+        results.append({
+            "watchlistname": row[0],
+            "symbol": row[1],
+            "name": row[2],
+            "timezone": row[3],
+            "updatetimestamp": row[4]
+        })
+    return results
+
+
+def insert_watchlist(
+    connection: psycopg2.extensions.connection, 
+    watchlistname: str, 
+    symbol: str, 
+    name: str, 
+    timezone: str
+) -> Dict[str, Any]:
+    """Insert a new stock entry into the watchlist."""
+    logger.debug(f"[ProcessData.py].insert_watchlist(): Inserting symbol {symbol} into watchlist {watchlistname}")
+    cursor = connection.cursor()
+    cursor.execute(
+        """
+        INSERT INTO watchlist (watchlistname, symbol, name, timezone, updatetimestamp)
+        VALUES (%s, %s, %s, %s, CURRENT_TIMESTAMP)
+        RETURNING watchlistname, symbol, name, timezone, updatetimestamp
+        """,
+        (watchlistname, symbol, name, timezone)
+    )
+    row = cursor.fetchone()
+    return {
+        "watchlistname": row[0],
+        "symbol": row[1],
+        "name": row[2],
+        "timezone": row[3],
+        "updatetimestamp": row[4]
+    }
+
+
+def update_watchlist(
+    connection: psycopg2.extensions.connection, 
+    watchlistname: str, 
+    symbol: str, 
+    name: Optional[str] = None, 
+    timezone: Optional[str] = None
+) -> Optional[Dict[str, Any]]:
+    """Update descriptive fields of a watchlist entry."""
+    logger.debug(f"[ProcessData.py].update_watchlist(): Updating watchlist {watchlistname}, symbol {symbol}")
+    cursor = connection.cursor()
+    
+    # Build dynamic update statement
+    fields = []
+    params = []
+    if name is not None:
+        fields.append("name = %s")
+        params.append(name)
+    if timezone is not None:
+        fields.append("timezone = %s")
+        params.append(timezone)
+        
+    if not fields:
+        # No updates provided, fetch current state
+        res = get_watchlist(connection, watchlistname, symbol)
+        return res[0] if res else None
+        
+    params.extend([watchlistname, symbol])
+    query = f"""
+        UPDATE watchlist 
+        SET {', '.join(fields)}, updatetimestamp = CURRENT_TIMESTAMP
+        WHERE watchlistname = %s AND symbol = %s
+        RETURNING watchlistname, symbol, name, timezone, updatetimestamp
+    """
+    
+    cursor.execute(query, params)
+    row = cursor.fetchone()
+    if row:
+        return {
+            "watchlistname": row[0],
+            "symbol": row[1],
+            "name": row[2],
+            "timezone": row[3],
+            "updatetimestamp": row[4]
+        }
+    return None
+
+
+def delete_watchlist(
+    connection: psycopg2.extensions.connection, 
+    watchlistname: str, 
+    symbol: str
+) -> bool:
+    """Delete a watchlist entry by composite key."""
+    logger.debug(f"[ProcessData.py].delete_watchlist(): Deleting watchlist {watchlistname}, symbol {symbol}")
+    cursor = connection.cursor()
+    cursor.execute(
+        "DELETE FROM watchlist WHERE watchlistname = %s AND symbol = %s",
+        (watchlistname, symbol)
+    )
+    return cursor.rowcount > 0
+
+
+def watchlist_symbol_exists(
+    connection: psycopg2.extensions.connection, 
+    symbol: str
+) -> bool:
+    """Check if a stock symbol exists in any watchlist."""
+    logger.debug(f"[ProcessData.py].watchlist_symbol_exists(): Checking symbol {symbol}")
+    cursor = connection.cursor()
+    cursor.execute(
+        "SELECT 1 FROM watchlist WHERE symbol = %s LIMIT 1",
+        (symbol,)
+    )
+    return cursor.fetchone() is not None
+
+
+def get_trades(
+    connection: psycopg2.extensions.connection, 
+    symbol: Optional[str] = None, 
+    buysell: Optional[str] = None
+) -> List[Dict[str, Any]]:
+    """Retrieve trades, optionally filtered by symbol and buysell."""
+    logger.debug("[ProcessData.py].get_trades(): Querying trade records")
+    cursor = connection.cursor()
+    query = "SELECT id, symbol, buysell, tradedate, investment, price, quantity, remarks, updatetimestamp FROM trade WHERE 1=1"
+    params = []
+    
+    if symbol:
+        query += " AND symbol = %s"
+        params.append(symbol)
+    if buysell:
+        query += " AND buysell = %s"
+        params.append(buysell)
+        
+    query += " ORDER BY tradedate DESC, id DESC"
+    cursor.execute(query, params)
+    
+    results = []
+    for row in cursor.fetchall():
+        results.append({
+            "id": row[0],
+            "symbol": row[1],
+            "buysell": row[2],
+            "tradedate": row[3],
+            "investment": row[4],
+            "price": row[5],
+            "quantity": row[6],
+            "remarks": row[7],
+            "updatetimestamp": row[8]
+        })
+    return results
+
+
+def insert_trade(
+    connection: psycopg2.extensions.connection,
+    symbol: str,
+    buysell: str,
+    tradedate: Any,
+    investment: bool,
+    price: Optional[float],
+    quantity: float,
+    remarks: Optional[str]
+) -> Dict[str, Any]:
+    """Insert a new trade log (generating trade ID)."""
+    logger.debug(f"[ProcessData.py].insert_trade(): Logging trade for symbol {symbol}")
+    cursor = connection.cursor()
+    cursor.execute(
+        """
+        INSERT INTO trade (symbol, buysell, tradedate, investment, price, quantity, remarks, updatetimestamp)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, CURRENT_TIMESTAMP)
+        RETURNING id, symbol, buysell, tradedate, investment, price, quantity, remarks, updatetimestamp
+        """,
+        (symbol, buysell, tradedate, investment, price, quantity, remarks)
+    )
+    row = cursor.fetchone()
+    return {
+        "id": row[0],
+        "symbol": row[1],
+        "buysell": row[2],
+        "tradedate": row[3],
+        "investment": row[4],
+        "price": row[5],
+        "quantity": row[6],
+        "remarks": row[7],
+        "updatetimestamp": row[8]
+    }
+
+
+def update_trade(
+    connection: psycopg2.extensions.connection,
+    trade_id: int,
+    symbol: Optional[str] = None,
+    buysell: Optional[str] = None,
+    tradedate: Optional[Any] = None,
+    investment: Optional[bool] = None,
+    price: Optional[float] = None,
+    quantity: Optional[float] = None,
+    remarks: Optional[str] = None
+) -> Optional[Dict[str, Any]]:
+    """Update existing trade fields."""
+    logger.debug(f"[ProcessData.py].update_trade(): Updating trade ID {trade_id}")
+    cursor = connection.cursor()
+    
+    # Build dynamic update statement
+    fields = []
+    params = []
+    
+    if symbol is not None:
+        fields.append("symbol = %s")
+        params.append(symbol)
+    if buysell is not None:
+        fields.append("buysell = %s")
+        params.append(buysell)
+    if tradedate is not None:
+        fields.append("tradedate = %s")
+        params.append(tradedate)
+    if investment is not None:
+        fields.append("investment = %s")
+        params.append(investment)
+    if price is not None:
+        fields.append("price = %s")
+        params.append(price)
+    if quantity is not None:
+        fields.append("quantity = %s")
+        params.append(quantity)
+    if remarks is not None:
+        fields.append("remarks = %s")
+        params.append(remarks)
+        
+    if not fields:
+        # Fetch current record state
+        cursor.execute("SELECT id, symbol, buysell, tradedate, investment, price, quantity, remarks, updatetimestamp FROM trade WHERE id = %s", (trade_id,))
+        row = cursor.fetchone()
+        if row:
+            return {
+                "id": row[0], "symbol": row[1], "buysell": row[2], "tradedate": row[3],
+                "investment": row[4], "price": row[5], "quantity": row[6], "remarks": row[7], "updatetimestamp": row[8]
+            }
+        return None
+        
+    params.append(trade_id)
+    query = f"""
+        UPDATE trade 
+        SET {', '.join(fields)}, updatetimestamp = CURRENT_TIMESTAMP
+        WHERE id = %s
+        RETURNING id, symbol, buysell, tradedate, investment, price, quantity, remarks, updatetimestamp
+    """
+    
+    cursor.execute(query, params)
+    row = cursor.fetchone()
+    if row:
+        return {
+            "id": row[0],
+            "symbol": row[1],
+            "buysell": row[2],
+            "tradedate": row[3],
+            "investment": row[4],
+            "price": row[5],
+            "quantity": row[6],
+            "remarks": row[7],
+            "updatetimestamp": row[8]
+        }
+    return None
+
+
+def delete_trade(
+    connection: psycopg2.extensions.connection, 
+    trade_id: int
+) -> bool:
+    """Delete a trade entry by ID."""
+    logger.debug(f"[ProcessData.py].delete_trade(): Deleting trade ID {trade_id}")
+    cursor = connection.cursor()
+    cursor.execute("DELETE FROM trade WHERE id = %s", (trade_id,))
+    return cursor.rowcount > 0
 
 
 

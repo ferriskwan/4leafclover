@@ -1,6 +1,6 @@
 import os
 import logging
-from typing import Dict, Any, List
+from typing import Dict, Any, List, Optional
 from dotenv import load_dotenv
 import datetime
 from contextlib import asynccontextmanager
@@ -11,7 +11,7 @@ from enum import Enum
 from fastapi import FastAPI, HTTPException, Security, Depends, Response, Path, Query
 from fastapi.responses import FileResponse
 from fastapi.security.api_key import APIKeyHeader
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 import ProcessData as pd
 import psycopg2
 
@@ -19,11 +19,23 @@ import psycopg2
 logger = logging.getLogger(__name__)
 
 
+# Global API KEY configuration
+API_KEY = os.getenv("API_KEY")
+
 # Database connection pool lifespan manager
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Initialize connection pool
-    pd.init_pool(minconn=1, maxconn=10)
+    # Initialize connection pool with recovery capability
+    try:
+        pd.init_pool(minconn=1, maxconn=10)
+    except Exception as e:
+        logger.error(f"Failed to initialize database connection pool during startup: {e}", exc_info=True)
+    
+    global API_KEY
+    if not API_KEY:
+        API_KEY = os.getenv("API_KEY")
+        if not API_KEY:
+            logger.warning("API_KEY environment variable is not configured. The API server cannot validate client requests.")
     yield
     # Close connection pool
     pd.close_pool()
@@ -37,13 +49,13 @@ app = FastAPI(
 )
 
 # API Key Authentication
-API_KEY = os.getenv("API_KEY")
-if not API_KEY:
-    raise RuntimeError("API_KEY environment variable is not configured. Please set it in your environment or .env file.")
 api_key_header = APIKeyHeader(name="X-API-KEY", auto_error=True)
 
 def verify_api_key(api_key: str = Depends(api_key_header)) -> str:
     """Validate the incoming X-API-KEY header against the configured environment variable."""
+    if not API_KEY:
+        logger.error("API_KEY validation requested but API_KEY is not configured on the server")
+        raise HTTPException(status_code=500, detail="API Security is not configured on the server.")
     if api_key != API_KEY:
         logger.warning("API key validation failed")
         raise HTTPException(status_code=403, detail="Could not validate credentials")
@@ -60,6 +72,38 @@ class OutputFormat(str, Enum):
 class DataPayload(BaseModel):
     meta: Dict[str, Any]
     values: List[Dict[str, Any]]
+
+
+class WatchListCreate(BaseModel):
+    watchlistname: str = Field(..., max_length=64, description="Name of the watchlist")
+    symbol: str = Field(..., max_length=10, pattern="^[A-Z0-9.-]+$", description="Unique stock symbol")
+    name: str = Field(..., max_length=64, description="Full company name")
+    timezone: str = Field(..., max_length=20, description="Exchange timezone")
+
+
+class WatchListUpdate(BaseModel):
+    name: Optional[str] = Field(None, max_length=64, description="New full company name")
+    timezone: Optional[str] = Field(None, max_length=20, description="New exchange timezone")
+
+
+class TradeCreate(BaseModel):
+    symbol: str = Field(..., max_length=10, pattern="^[A-Z0-9.-]+$", description="Stock symbol associated with the trade")
+    buysell: str = Field(..., pattern="^[BS]$", description="Transaction direction: B=Buy, S=Sell")
+    tradedate: datetime.datetime = Field(..., description="Date and time of the transaction")
+    investment: bool = Field(..., description="True if long-term investment, False if tactical short-term")
+    price: Optional[float] = Field(None, description="Price per unit (can be null)")
+    quantity: float = Field(..., description="Quantity of shares transacted")
+    remarks: Optional[str] = Field(None, max_length=200, description="Optional annotations")
+
+
+class TradeUpdate(BaseModel):
+    symbol: Optional[str] = Field(None, max_length=10, pattern="^[A-Z0-9.-]+$", description="New stock symbol")
+    buysell: Optional[str] = Field(None, pattern="^[BS]$", description="New transaction direction: B=Buy, S=Sell")
+    tradedate: Optional[datetime.datetime] = Field(None, description="New transaction datetime")
+    investment: Optional[bool] = Field(None, description="New investment horizon flag")
+    price: Optional[float] = Field(None, description="New price per unit")
+    quantity: Optional[float] = Field(None, description="New quantity of shares")
+    remarks: Optional[str] = Field(None, max_length=200, description="New optional annotations")
 
 
 @app.post("/api/v1/sys/init", dependencies=[Depends(verify_api_key)])
@@ -259,6 +303,226 @@ def get_tick_data(
         raise
     except Exception as e:
         logger.error(f"Error generating Tick data: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        if 'conn' in locals() and conn:
+            pd.put_connection(conn)
+
+
+# ==========================================
+# WatchList CRUD REST Endpoints
+# ==========================================
+
+@app.get("/api/v1/watchlist", dependencies=[Depends(verify_api_key)])
+def api_get_watchlist(
+    watchlistname: Optional[str] = Query(None, max_length=64),
+    symbol: Optional[str] = Query(None, max_length=10, pattern="^[A-Z0-9.-]+$")
+) -> Any:
+    """Retrieve watchlist entries, optionally filtered by watchlistname or symbol."""
+    logger.info(f"Retrieving watchlist (name={watchlistname}, symbol={symbol})")
+    try:
+        conn = pd.get_connection()
+        res = pd.get_watchlist(conn, watchlistname=watchlistname, symbol=symbol)
+        return res
+    except Exception as e:
+        logger.error(f"Error querying watchlist: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        if 'conn' in locals() and conn:
+            pd.put_connection(conn)
+
+
+@app.post("/api/v1/watchlist", status_code=201, dependencies=[Depends(verify_api_key)])
+def api_insert_watchlist(payload: WatchListCreate) -> Any:
+    """Add a new stock entry to the watchlist."""
+    logger.info(f"Creating watchlist entry: {payload.watchlistname}/{payload.symbol}")
+    try:
+        conn = pd.get_connection()
+        res = pd.insert_watchlist(conn, payload.watchlistname, payload.symbol, payload.name, payload.timezone)
+        conn.commit()
+        return res
+    except psycopg2.IntegrityError as e:
+        logger.warning(f"Integrity error inserting watchlist entry: {e}")
+        raise HTTPException(status_code=409, detail="Watchlist entry already exists.")
+    except Exception as e:
+        logger.error(f"Error inserting watchlist: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        if 'conn' in locals() and conn:
+            pd.put_connection(conn)
+
+
+@app.put("/api/v1/watchlist", dependencies=[Depends(verify_api_key)])
+def api_update_watchlist(
+    watchlistname: str = Query(..., max_length=64),
+    symbol: str = Query(..., max_length=10, pattern="^[A-Z0-9.-]+$"),
+    payload: WatchListUpdate = None
+) -> Any:
+    """Update descriptive fields of a watchlist entry."""
+    logger.info(f"Updating watchlist entry: {watchlistname}/{symbol}")
+    try:
+        conn = pd.get_connection()
+        res = pd.update_watchlist(
+            conn, 
+            watchlistname, 
+            symbol, 
+            name=payload.name if payload else None, 
+            timezone=payload.timezone if payload else None
+        )
+        if not res:
+            raise HTTPException(status_code=404, detail="Watchlist entry not found.")
+        conn.commit()
+        return res
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error updating watchlist: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        if 'conn' in locals() and conn:
+            pd.put_connection(conn)
+
+
+@app.delete("/api/v1/watchlist", dependencies=[Depends(verify_api_key)])
+def api_delete_watchlist(
+    watchlistname: str = Query(..., max_length=64),
+    symbol: str = Query(..., max_length=10, pattern="^[A-Z0-9.-]+$")
+) -> Any:
+    """Delete a watchlist entry by composite key."""
+    logger.info(f"Deleting watchlist entry: {watchlistname}/{symbol}")
+    try:
+        conn = pd.get_connection()
+        success = pd.delete_watchlist(conn, watchlistname, symbol)
+        if not success:
+            raise HTTPException(status_code=404, detail="Watchlist entry not found.")
+        conn.commit()
+        return {"status": "success", "message": f"Deleted watchlist entry '{watchlistname}/{symbol}'"}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error deleting watchlist: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        if 'conn' in locals() and conn:
+            pd.put_connection(conn)
+
+
+# ==========================================
+# Trade CRUD REST Endpoints
+# ==========================================
+
+@app.get("/api/v1/trade", dependencies=[Depends(verify_api_key)])
+def api_get_trades(
+    symbol: Optional[str] = Query(None, max_length=10, pattern="^[A-Z0-9.-]+$"),
+    buysell: Optional[str] = Query(None, pattern="^[BS]$")
+) -> Any:
+    """Retrieve trades, optionally filtered by symbol or transaction type."""
+    logger.info(f"Retrieving trades (symbol={symbol}, buysell={buysell})")
+    try:
+        conn = pd.get_connection()
+        res = pd.get_trades(conn, symbol=symbol, buysell=buysell)
+        return res
+    except Exception as e:
+        logger.error(f"Error querying trades: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        if 'conn' in locals() and conn:
+            pd.put_connection(conn)
+
+
+@app.post("/api/v1/trade", status_code=201, dependencies=[Depends(verify_api_key)])
+def api_insert_trade(payload: TradeCreate) -> Any:
+    """Record a new trade log (generating ID automatically)."""
+    logger.info(f"Creating trade for symbol: {payload.symbol}")
+    try:
+        conn = pd.get_connection()
+        # Enforce Watchlist referential integrity constraint
+        if not pd.watchlist_symbol_exists(conn, payload.symbol):
+            raise HTTPException(
+                status_code=400, 
+                detail=f"Symbol '{payload.symbol}' must exist in the Watchlist before a trade can be recorded."
+            )
+        res = pd.insert_trade(
+            conn, 
+            payload.symbol, 
+            payload.buysell, 
+            payload.tradedate, 
+            payload.investment, 
+            payload.price, 
+            payload.quantity, 
+            payload.remarks
+        )
+        conn.commit()
+        return res
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error logging trade: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        if 'conn' in locals() and conn:
+            pd.put_connection(conn)
+
+
+@app.put("/api/v1/trade/{id}", dependencies=[Depends(verify_api_key)])
+def api_update_trade(
+    id: int = Path(..., description="Unique ID of the trade"),
+    payload: TradeUpdate = None
+) -> Any:
+    """Update an existing trade log."""
+    logger.info(f"Updating trade ID: {id}")
+    try:
+        conn = pd.get_connection()
+        # Enforce Watchlist constraint if symbol is being updated
+        if payload and payload.symbol is not None:
+            if not pd.watchlist_symbol_exists(conn, payload.symbol):
+                raise HTTPException(
+                    status_code=400, 
+                    detail=f"Symbol '{payload.symbol}' must exist in the Watchlist before a trade can be updated."
+                )
+                
+        res = pd.update_trade(
+            conn,
+            id,
+            symbol=payload.symbol if payload else None,
+            buysell=payload.buysell if payload else None,
+            tradedate=payload.tradedate if payload else None,
+            investment=payload.investment if payload else None,
+            price=payload.price if payload else None,
+            quantity=payload.quantity if payload else None,
+            remarks=payload.remarks if payload else None
+        )
+        if not res:
+            raise HTTPException(status_code=404, detail="Trade record not found.")
+        conn.commit()
+        return res
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error updating trade ID {id}: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        if 'conn' in locals() and conn:
+            pd.put_connection(conn)
+
+
+@app.delete("/api/v1/trade/{id}", dependencies=[Depends(verify_api_key)])
+def api_delete_trade(
+    id: int = Path(..., description="Unique ID of the trade")
+) -> Any:
+    """Remove a trade record by ID."""
+    logger.info(f"Deleting trade ID: {id}")
+    try:
+        conn = pd.get_connection()
+        success = pd.delete_trade(conn, id)
+        if not success:
+            raise HTTPException(status_code=404, detail="Trade record not found.")
+        conn.commit()
+        return {"status": "success", "message": f"Deleted trade ID '{id}'"}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error deleting trade: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
     finally:
         if 'conn' in locals() and conn:
